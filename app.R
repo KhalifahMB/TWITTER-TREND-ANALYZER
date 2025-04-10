@@ -1,5 +1,4 @@
 # app.R - Main Shiny application
-
 # Load required libraries
 library(shiny)
 library(DT)
@@ -8,13 +7,20 @@ library(shinyFeedback) # For user feedback
 library(shinyjs) # For JavaScript utilities
 library(shinybusy) # For loading spinner
 library(reticulate) # For Python integration
+library(topicmodels) # LDA topic modeling
+library(tidytext) # Text mining
+library(ggraph) # Network visualization
+library(igraph) # Network analysis
 library(stringi) # For string manipulation
+library(tidyverse)
+
 
 # Source our modules
 source("utils.R")
 source("sentiment_analysis.R")
 source("twitter_api.R")
 source("visualization.R")
+source("trends.R")
 
 # Check Python setup at startup
 use_virtualenv("./virtualenvs/r-reticulate", required = TRUE)
@@ -49,7 +55,7 @@ ui <- fluidPage(
   ),
   sidebarLayout(
     sidebarPanel(
-      width = 3,
+      width = 4,
       div(
         class = "well",
         conditionalPanel(
@@ -96,7 +102,11 @@ ui <- fluidPage(
           class = "btn-success"
         ),
         conditionalPanel(
-          condition = "input.analyze > 0",
+          condition = "input.data_source == 'Fetch from Twitter'",
+          numericInput("hours_back", "Analyze last (hours):", value = 24, min = 1, max = 168)
+        ),
+        conditionalPanel(
+          condition = "input.analyze",
           downloadButton("download_data", "Download Results")
         )
       )
@@ -105,6 +115,7 @@ ui <- fluidPage(
       width = 8,
       tabsetPanel(
         type = "tabs",
+        # Analysis Tab
         tabPanel(
           "Analysis",
           div(
@@ -125,6 +136,8 @@ ui <- fluidPage(
             )
           )
         ),
+
+        # Tweets Tab
         tabPanel(
           "Tweets",
           div(
@@ -136,9 +149,49 @@ ui <- fluidPage(
             )
           )
         ),
+
+        # Trend Analysis Tab
+        tabPanel(
+          "Trend Analysis",
+          div(
+            class = "loading-message",
+            shinycssloaders::withSpinner(
+              plotOutput("trend_volume_plot", height = "400px"),
+              type = 4, color = "#0dc5c1"
+            )
+          ),
+          br(),
+          div(
+            class = "loading-message",
+            shinycssloaders::withSpinner(
+              plotOutput("topic_model_plot", height = "400px"),
+              type = 4, color = "#0dc5c1"
+            )
+          )
+        ),
+
+        # Network Analysis Tab
+        tabPanel(
+          "Network Analysis",
+          div(
+            class = "loading-message",
+            shinycssloaders::withSpinner(
+              plotOutput("network_plot", height = "600px"),
+              type = 4, color = "#0dc5c1"
+            )
+          )
+        ),
+
+        # Top Trends Tab
+        tabPanel(
+          "Top Trends",
+          DTOutput("trend_table")
+        ),
+
+        # About Tab
         tabPanel(
           "About",
-          includeMarkdown("about.md")
+          includeMarkdown("README.md")
         )
       )
     )
@@ -149,6 +202,9 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   # Reactive value to store tweets
   tweets_data <- reactiveVal(NULL)
+  trend_metrics <- reactiveVal(NULL)
+  lda_model <- reactiveVal(NULL)
+  mention_network <- reactiveVal(NULL)
 
   # Observe data source changes
   observeEvent(input$data_source, {
@@ -196,6 +252,7 @@ server <- function(input, output, session) {
       )
       return(NULL)
     }
+    data$cleaned <- vapply(data$text, clean_tweet, character(1))
 
     tweets_data(data)
   })
@@ -295,6 +352,34 @@ server <- function(input, output, session) {
     tweets_data(result)
   })
 
+  # Handle trend analysis
+  observeEvent(tweets_data(), {
+    # print("observing trending analysis")
+    # print(tweets_data())
+    req(tweets_data())
+
+    # Calculate trend metrics
+    withProgress(message = "Analyzing trends...", {
+      metrics <- tweets_data() %>%
+        extract_hashtags() %>%
+        calculate_trend_metrics()
+      trend_metrics(metrics)
+    })
+
+    # Perform topic modeling
+    withProgress(message = "Modeling topics...", {
+      model <- perform_topic_modeling(tweets_data())
+      lda_model(model)
+    })
+
+    # Prepare network data
+    withProgress(message = "Analyzing network...", {
+      network <- prepare_network_data(tweets_data())
+      mention_network(network)
+    })
+  })
+
+
   # Outputs
   output$sentiment_plot <- renderPlot({
     req(tweets_data())
@@ -306,8 +391,48 @@ server <- function(input, output, session) {
     generate_wordcloud(tweets_data())
   })
 
+  output$trend_volume_plot <- renderPlot({
+    req(trend_metrics())
+    plot_trend_volume(trend_metrics())
+  })
+
+  output$topic_model_plot <- renderPlot({
+    req(lda_model())
+    plot_topic_model(lda_model())
+  })
+
+  output$network_plot <- renderPlot({
+    req(mention_network())
+    plot_network(mention_network())
+  })
+
+  output$trend_table <- renderDT({
+    req(trend_metrics())
+    trending <- detect_trending_hashtags(trend_metrics())
+
+    datatable(
+      trending,
+      options = list(
+        pageLength = 10,
+        dom = "Bfrtip",
+        buttons = c("copy", "csv", "excel")
+      ),
+      rownames = FALSE,
+      caption = "Top Trending Hashtags"
+    ) %>%
+      formatStyle(
+        "peak_velocity",
+        background = styleColorBar(trending$peak_velocity, "lightblue"),
+        backgroundSize = "98% 88%",
+        backgroundRepeat = "no-repeat",
+        backgroundPosition = "center"
+      )
+  })
+
+
   output$tweet_table <- renderDT({
     req(tweets_data())
+    req(input$analyze > 0)
 
     # Safely prepare table data with encoding handling
     table_data <- tryCatch(
@@ -327,12 +452,14 @@ server <- function(input, output, session) {
         scrollX = TRUE,
         autoWidth = TRUE,
         columnDefs = list(
-          list(width = "60%", targets = 0),
+          list(width = "20%", targets = 0),
           list(width = "20%", targets = 1),
-          list(width = "20%", targets = 2)
+          list(width = "5%", targets = 3),
+          list(width = "10%", targets = 4),
+          list(width = "10%", targets = 5)
         )
       ),
-      rownames = FALSE,
+      rownames = TRUE,
       filter = "top"
     )
   })

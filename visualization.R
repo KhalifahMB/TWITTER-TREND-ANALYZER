@@ -4,6 +4,8 @@
 plot_sentiment <- function(tweets) {
   if (!requireNamespace("ggplot2", quietly = TRUE)) {
     stop("ggplot2 package is required but not installed")
+    return(table_data)
+    return(table_data)
   }
 
   if (is.null(tweets) || nrow(tweets) == 0 || !"sentiment_label" %in% names(tweets)) {
@@ -71,26 +73,81 @@ generate_wordcloud <- function(tweets) {
 
 #' Prepare data for tweet table
 prepare_tweet_table <- function(tweets) {
-  if (is.null(tweets) || nrow(tweets) == 0) {
+  if (is.null(tweets) || nrow(tweets) == 0 || !"sentiment_label" %in% names(tweets)) {
     return(data.frame(Message = "No tweets available"))
   }
 
   # Ensure text is properly encoded before processing
   tweets$text <- stringi::stri_enc_toutf8(tweets$text, validate = TRUE)
 
-  tweets %>%
-    dplyr::select(text, sentiment_score, sentiment_label) %>%
+  table_data <- tweets %>%
+    dplyr::select(text, cleaned, sentiment_score, sentiment_label, created_at) %>%
     dplyr::mutate(
-      sentiment_score = round(sentiment_score, 3),
+      sentiment_score = ifelse(!is.na(sentiment_score), round(sentiment_score, 3), NA),
       text = purrr::map_chr(text, ~ {
-        # Safely truncate text
         tryCatch(
-          stringr::str_trunc(.x, width = 100),
-          error = function(e) {
-            # If truncation fails, just take first 100 characters
-            substr(.x, 1, min(100, nchar(.x)))
-          }
+          stringr::str_trunc(.x, width = 70),
+          error = function(e) substr(.x, 1, min(100, nchar(.x)))
         )
       })
     )
+}
+
+#' Plot trend volume over time
+plot_trend_volume <- function(trend_metrics) {
+  # Data prep - aggregate by hour
+  heat_data <- trend_metrics %>%
+    mutate(hour = hour(date)) %>%
+    group_by(hashtag, hour) %>%
+    summarise(avg_volume = mean(volume), .groups = "drop")
+
+  ggplot(heat_data, aes(x = hour, y = hashtag, fill = avg_volume)) +
+    geom_tile(color = "white") +
+    # scale_fill_gradient(low = "white", high = "steelblue") +
+    labs(
+      title = "Hourly Hashtag Activity",
+      x = "Hour of Day",
+      y = "Hashtag",
+      fill = "Avg Volume"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 0),
+      panel.grid = element_blank()
+    )
+}
+
+#' Plot topic modeling results
+plot_topic_model <- function(lda_model) {
+  topics <- tidy(lda_model, matrix = "beta")
+
+  top_terms <- topics %>%
+    group_by(topic) %>%
+    top_n(5, beta) %>%
+    ungroup() %>%
+    arrange(topic, -beta)
+
+  ggplot(top_terms, aes(reorder(term, beta), beta, fill = factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~topic, scales = "free") +
+    coord_flip() +
+    labs(
+      title = "Top Terms in Each Topic",
+      x = "Term",
+      y = "Beta (Term Importance)"
+    ) +
+    theme_minimal()
+}
+
+#' Plot network graph
+plot_network <- function(network) {
+  ggraph(network, layout = "fr") +
+    geom_edge_link(aes(alpha = ..index..), show.legend = FALSE) +
+    geom_node_point(size = 3, color = "steelblue") +
+    geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+    labs(
+      title = "User Mention Network",
+      subtitle = "Node size represents influence"
+    ) +
+    theme_void()
 }
